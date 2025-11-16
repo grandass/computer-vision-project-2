@@ -11,6 +11,8 @@ Student Tasks:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision import models
+from torchvision.models import EfficientNet_B0_Weights
 
 
 class SimpleCNN(nn.Module):
@@ -107,24 +109,40 @@ class StudentModel(nn.Module):
         
         # TODO: Define your network layers here
         # Example: You can use pretrained ResNet
-        # import torchvision.models as models
-        # self.backbone = models.resnet18(pretrained=True)
-        # self.backbone.fc = nn.Linear(self.backbone.fc.in_features, 1)
+        self.backbone = models.efficientnet_b0(
+            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+        )
+        for param in self.backbone.features.parameters():
+            param.requires_grad = False
 
-        pass
-    
+        for param in self.backbone.features[-2:].parameters():
+            param.requires_grad = True
+
+        # Replace final classification layer with regression head
+        in_features = self.backbone.classifier[1].in_features
+        self.backbone.classifier[1] = nn.Linear(in_features, 1)
+
+        self.unfrozen = False  # track if we already unfroze
+
+    def unfreeze_backbone(self):
+        if not self.unfrozen:
+            print(">>> Unfreezing EfficientNet backbone...")
+            for param in self.backbone.features.parameters():
+                param.requires_grad = True
+            self.unfrozen = True
+
     def forward(self, x):
         """
         Forward pass
-        
+
         Args:
             x: Input image tensor [batch_size, 3, 224, 224]
-        
+
         Returns:
             Output regression value [batch_size]
         """
         # TODO: Implement forward pass
-        pass
+        return self.backbone(x).squeeze(1)
 
 
 def get_model(model_name='simple_cnn', **kwargs):
@@ -145,17 +163,3 @@ def get_model(model_name='simple_cnn', **kwargs):
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
-
-if __name__ == '__main__':
-    """Test models"""
-
-    # Test SimpleCNN
-    print("Testing SimpleCNN...")
-    model = SimpleCNN()
-    x = torch.randn(4, 3, 224, 224)  # batch_size=4
-    output = model(x)
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {output.shape}")
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    print("\nModels are working correctly!")

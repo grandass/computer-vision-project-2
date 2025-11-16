@@ -175,7 +175,7 @@ def main():
     if args.resume:
         start_epoch, _, _ = load_checkpoint(model, optimizer, args.resume, device)
         start_epoch += 1
-    
+
     # Training history
     train_losses = []
     val_losses = []
@@ -240,6 +240,9 @@ def main():
             if early_stopping(val_loss):
                 print(f"\nEarly stopping triggered at epoch {epoch}")
                 break
+
+        if epoch == 5:
+            model.unfreeze_backbone()
     
     # Training complete
     print("\n" + "="*60)
