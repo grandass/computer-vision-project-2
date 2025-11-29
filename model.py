@@ -1,165 +1,127 @@
-"""
-Model Module for Medical Image Regression Task
-
-Student Tasks:
-1. Understand the SimpleCNN architecture
-2. Design and implement your own model architecture
-3. Try different network depths, widths, and architectures
-4. You can try using pretrained models (ResNet, EfficientNet, etc.)
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
-from torchvision.models import EfficientNet_B0_Weights
 
+# -----------------------
+# Attention modules (CBAM-style)
+# -----------------------
 
-class SimpleCNN(nn.Module):
-    """
-    Simple CNN Baseline Model
-    This is a basic convolutional neural network as a starting point for students
-    
-    Network Architecture:
-    - 4 convolutional blocks (Conv + BatchNorm + ReLU + MaxPool)
-    - 2 fully connected layers
-    - Final output: single regression value
-    """
-    
-    def __init__(self, num_channels=3):
-        super(SimpleCNN, self).__init__()
-        
-        # Convolutional block 1: 3 -> 32
-        self.conv1 = nn.Conv2d(num_channels, 32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        
-        # Convolutional block 2: 32 -> 64
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        
-        # Convolutional block 3: 64 -> 128
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        
-        # Convolutional block 4: 128 -> 256
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
-        
-        # Max pooling
-        self.pool = nn.MaxPool2d(2, 2)
-        
-        # Fully connected layers
-        # Input: 224x224 -> 112x112 -> 56x56 -> 28x28 -> 14x14
-        # 14 * 14 * 256 = 50176
-        self.fc1 = nn.Linear(256 * 14 * 14, 512)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(512, 1)  # Regression task: output 1 value
-    
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        assert kernel_size in (3, 7)
+        padding = 3 if kernel_size == 7 else 1
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
     def forward(self, x):
-        """
-        Forward pass
-        
-        Args:
-            x: Input image tensor [batch_size, 3, 224, 224]
-        
-        Returns:
-            Output regression value [batch_size]
-        """
-        # Convolutional block 1
-        x = self.pool(F.relu(self.bn1(self.conv1(x))))  # [B, 32, 112, 112]
-        
-        # Convolutional block 2
-        x = self.pool(F.relu(self.bn2(self.conv2(x))))  # [B, 64, 56, 56]
-        
-        # Convolutional block 3
-        x = self.pool(F.relu(self.bn3(self.conv3(x))))  # [B, 128, 28, 28]
-        
-        # Convolutional block 4
-        x = self.pool(F.relu(self.bn4(self.conv4(x))))  # [B, 256, 14, 14]
-        
-        # Flatten
-        x = x.view(x.size(0), -1)  # [B, 50176]
-        
-        # Fully connected layers
-        x = F.relu(self.fc1(x))  # [B, 512]
-        x = self.dropout(x)
-        x = self.fc2(x)  # [B, 1]
-        
-        return x.squeeze(1)  # [B]
+        # along channel axis
+        avg = torch.mean(x, dim=1, keepdim=True)
+        max_ = torch.max(x, dim=1, keepdim=True)[0]
+        cat = torch.cat([avg, max_], dim=1)
+        out = self.conv(cat)
+        return self.sigmoid(out) * x
 
+class CBAM(nn.Module):
+    def __init__(self, in_planes, reduction=16, kernel_size=7):
+        super().__init__()
+        self.sa = SpatialAttention(kernel_size=kernel_size)
 
-# ==================== Student Implementation Area ====================
-# TODO: Implement your own model below
-# Hints:
-# 1. You can increase network depth (more convolutional layers)
-# 2. You can use residual connections (ResNet style)
-# 3. You can use attention mechanisms
-# 4. You can use pretrained models (torchvision.models)
-# 5. You can try different activation functions, regularization methods, etc.
+    def forward(self, x):
+        x = self.sa(x)
+        return x
 
+# -----------------------
+# StudentModel
+# -----------------------
 class StudentModel(nn.Module):
     """
-    Student Custom Model
-    
-    TODO: Implement your model architecture here
+    Student custom model using EfficientNet-B0 backbone + CBAM attention + regression head.
+    - By default most backbone feature layers are frozen (only last block trainable).
+    - Call `unfreeze_backbone()` to unfreeze entire backbone for fine-tuning.
     """
-    
-    def __init__(self, num_channels=3):
-        super(StudentModel, self).__init__()
-        
-        # TODO: Define your network layers here
-        # Example: You can use pretrained ResNet
+
+    def __init__(self, num_channels=3, pretrained=True, dropout=0.3):
+        super().__init__()
+
+        # Load EfficientNet-B0
+        if num_channels != 3:
+            # torchvision's EfficientNet expects 3 channels; if different, create a small conv stem
+            self.stem = nn.Conv2d(num_channels, 3, kernel_size=3, padding=1, bias=False)
+        else:
+            self.stem = None
+
         self.backbone = models.efficientnet_b0(
-            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
         )
-        for param in self.backbone.features.parameters():
-            param.requires_grad = False
 
-        for param in self.backbone.features[-2:].parameters():
-            param.requires_grad = True
+        # Freeze backbone features by default (fine tune only last block)
+        for p in self.backbone.features.parameters():
+            p.requires_grad = False
 
-        # Replace final classification layer with regression head
-        in_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier[1] = nn.Linear(in_features, 1)
+        # Unfreeze the last two feature blocks to allow some adaptation
+        # EfficientNet features is an nn.Sequential of MBConv blocks; unfreeze last two
+        try:
+            for p in self.backbone.features[-2:].parameters():
+                p.requires_grad = True
+        except Exception:
+            # defensive: if indexing fails, unfreeze last block
+            for p in self.backbone.features[-1].parameters():
+                p.requires_grad = True
 
-        self.unfrozen = False  # track if we already unfroze
+        # Attach CBAM attention to the last feature channel size
+        last_chan = self.backbone.features[-1][0].conv[0][0].out_channels \
+            if hasattr(self.backbone.features[-1][0], 'conv') else 1280
+        # Fallback to 1280 which EfficientNet-B0 uses
+        if not isinstance(last_chan, int):
+            last_chan = 1280
+        self.cbam = CBAM(last_chan, reduction=16, kernel_size=7)
+
+        # Regression head: global pool -> FC -> dropout -> final linear
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc1 = nn.Linear(last_chan, 256)
+        self.fc2 = nn.Linear(256, 1)
+
+        self.unfrozen = False
+
+        # Initialize small head
+        nn.init.kaiming_normal_(self.fc1.weight, nonlinearity='relu')
+        nn.init.constant_(self.fc1.bias, 0.0)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.constant_(self.fc2.bias, 0.0)
 
     def unfreeze_backbone(self):
+        """Unfreeze entire backbone for fine-tuning (call when ready)."""
         if not self.unfrozen:
-            print(">>> Unfreezing EfficientNet backbone...")
-            for param in self.backbone.features.parameters():
-                param.requires_grad = True
+            for p in self.backbone.features.parameters():
+                p.requires_grad = True
+            # also unfreeze stem if present
+            if self.stem is not None:
+                for p in self.stem.parameters():
+                    p.requires_grad = True
             self.unfrozen = True
+            print(">>> StudentModel: backbone unfrozen for fine-tuning.")
 
     def forward(self, x):
-        """
-        Forward pass
+        # optional stem to convert num_channels -> 3
+        if self.stem is not None:
+            x = self.stem(x)
 
-        Args:
-            x: Input image tensor [batch_size, 3, 224, 224]
+        # EfficientNet feature extractor (all layers except classifier)
+        x = self.backbone.features(x)   # [B, C, H, W]
 
-        Returns:
-            Output regression value [batch_size]
-        """
-        # TODO: Implement forward pass
-        return self.backbone(x).squeeze(1)
+        # attention on top of last feature map
+        x = self.cbam(x)
 
+        # global pooling and head
+        x = self.pool(x)               # [B, C, 1, 1]
+        x = torch.flatten(x, 1)        # [B, C]
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)                # [B, 1]
+        return x.squeeze(1)            # [B]
 
 def get_model(model_name='simple_cnn', **kwargs):
-    """
-    Model factory function
-    
-    Args:
-        model_name (str): Model name
-        **kwargs: Model parameters
-    
-    Returns:
-        model: PyTorch model
-    """
-    if model_name == 'simple_cnn':
-        return SimpleCNN(**kwargs)
-    elif model_name == 'student':
-        return StudentModel(**kwargs)
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
-
+    return StudentModel(**kwargs)
